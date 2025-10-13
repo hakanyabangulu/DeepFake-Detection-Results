@@ -5,24 +5,26 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 from tqdm import tqdm
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import precision_recall_curve, recall_score, f1_score, precision_score
+import numpy as np
+
 
 
 
 # ----- PATHS -----
 VIDEO_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Videolar"
-FRAME_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Haar_Frames"
+FRAME_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Frames\Yunet_Frames"
 TEST_VIDEO_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\TestVideolar"
 MODEL_PATH = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Models\cnn_classifier.pth"
 FACE_MODEL_PATH = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Models\face_detection_yunet_2023mar.onnx"
 
 BATCH = 32
-EPOCHS = 10
+EPOCHS = 15
 LR = 1e-3
-FRAMES_PER_VIDEO = 5
+FRAMES_PER_VIDEO = 8
 THRESHOLD = 0.5
 FRAME_SAMPLE_RATE = 5
-CONFIDENCE_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = 0.94
 
 # ----- YÜZ ALGILAMA -----
 if not os.path.exists(FACE_MODEL_PATH):
@@ -118,6 +120,7 @@ class CNNClassifier(nn.Module):
         return self.classifier(x)
 
 # ----- TRAIN -----
+
 def train_model(log_callback=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -151,7 +154,8 @@ def train_model(log_callback=None):
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    best_val_acc, best_val_loss, patience_counter = 0.0, float('inf'), 0
+    best_val_acc, best_val_loss = 0.0, float('inf')
+    patience_counter = 0
     patience = 5
 
     for epoch in range(EPOCHS):
@@ -159,7 +163,7 @@ def train_model(log_callback=None):
         model.train()
         running_loss, correct, total = 0.0, 0, 0
         for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Training]"):
-            imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            imgs, labels = imgs.to(device), labels.to(device)
             outputs = model(imgs)
             loss = criterion(outputs, labels)
             optimizer.zero_grad()
@@ -171,218 +175,145 @@ def train_model(log_callback=None):
             correct += (predicted == labels).sum().item()
             total += labels.size(0)
 
-        train_loss = running_loss / len(train_loader)
         train_acc = correct / total
+        train_loss = running_loss / len(train_loader)
 
         # Validation
         model.eval()
         val_running_loss, val_correct, val_total = 0.0, 0, 0
+        all_val_preds, all_val_labels, all_val_probs = [], [], []
         with torch.no_grad():
             for imgs, labels in tqdm(val_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Validation]"):
                 imgs, labels = imgs.to(device), labels.to(device)
                 outputs = model(imgs)
                 loss = criterion(outputs, labels)
                 val_running_loss += loss.item()
+                probs = torch.softmax(outputs, dim=1)[:, 1]
+                all_val_probs.extend(probs.cpu().numpy())
+                all_val_labels.extend(labels.cpu().numpy())
                 _, predicted = torch.max(outputs, 1)
                 val_correct += (predicted == labels).sum().item()
                 val_total += labels.size(0)
 
         val_loss = val_running_loss / len(val_loader)
         val_acc = val_correct / val_total
+
         scheduler.step()
+        print(f"Epoch {epoch+1}: TrainAcc={train_acc:.4f}, ValAcc={val_acc:.4f}")
 
-        msg = (f"Epoch {epoch+1}: Train Loss={train_loss:.4f}, Train Accuracy={train_acc:.4f}, "
-               f"Validation Loss={val_loss:.4f}, Validation Accuracy={val_acc:.4f}")
-        if log_callback:
-            log_callback(msg)
-        else:
-            print(msg)
-
-        # Save the best model
+        # Save best model
         if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
             best_val_acc = val_acc
             best_val_loss = val_loss
             torch.save(model.state_dict(), MODEL_PATH)
-            msg = f"✔ New best model saved! (Validation Accuracy={val_acc:.4f}, Validation Loss={val_loss:.4f})"
-            if log_callback:
-                log_callback(msg)
-            else:
-                print(msg)
+            print(f"✔ Yeni en iyi model kaydedildi (ValAcc={val_acc:.4f}, ValLoss={val_loss:.4f})")
             patience_counter = 0
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                msg = "⛔ Early stopping triggered."
-                if log_callback:
-                    log_callback(msg)
-                else:
-                    print(msg)
+                print("⛔ Early stopping.")
                 break
 
-    return model
+    # ---- Validation sonu: en iyi threshold bulma ----
+    
+    prec, rec, thr = precision_recall_curve(all_val_labels, all_val_probs)
+    f1 = 2 * prec * rec / (prec + rec + 1e-8)
+    best_idx = np.nanargmax(f1[:-1])
+    best_thr = thr[best_idx]
+    print(f"\n🎯 Validation tabanlı en iyi eşik (THRESHOLD): {best_thr:.3f} | F1={f1[best_idx]:.4f}")
+    return model, best_thr
+
 
 # ----- TEST -----
-def test_model(video_files=None, log_callback=None):
+def test_model(threshold=0.5, log_callback=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     transform = T.Compose([T.ToPILImage(), T.Resize((256, 256)), T.ToTensor()])
     criterion = nn.CrossEntropyLoss()
 
-    try:
-        model = CNNClassifier().to(device)
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-        model.eval()
-    except Exception as e:
-        msg = f"Error loading model from {MODEL_PATH}: {str(e)}"
-        if log_callback:
-            log_callback(msg)
-        else:
-            print(msg)
-        return [], 0.0, 0.0
+    model = CNNClassifier().to(device)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.eval()
 
-    results = []
     total_correct, total_videos, running_loss = 0, 0, 0.0
     all_preds, all_labels = [], []
 
-    test_folders = {
-        "real": os.path.join(TEST_VIDEO_FOLDER, "test_real"),
-        "fake": os.path.join(TEST_VIDEO_FOLDER, "test_fake")
-    }
-
-    for label, folder in test_folders.items():
+    for label in ["real", "fake"]:
+        folder = os.path.join(TEST_VIDEO_FOLDER, f"test_{label}")
         if not os.path.exists(folder):
-            msg = f"Test folder not found: {folder}"
-            if log_callback:
-                log_callback(msg)
-            else:
-                print(msg)
+            print(f"Test klasörü bulunamadı: {folder}")
             continue
-
         ground_truth = 0 if label == "real" else 1
-        if video_files:
-            videos = [f for f in video_files if os.path.basename(f).lower().endswith((".mp4", ".avi", ".mov"))]
-        else:
-            videos = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith((".mp4", ".avi", ".mov"))]
+        videos = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".mp4")]
 
-        for video in tqdm(videos, desc=f"Testing {label.capitalize()}"):
-            try:
-                video_path = video if video_files else os.path.join(folder, video)
-                cap = cv2.VideoCapture(video_path)
-                if not cap.isOpened():
-                    msg = f"Error opening video file: {os.path.basename(video_path)}"
-                    if log_callback:
-                        log_callback(msg)
-                    else:
-                        print(msg)
-                    continue
+        for video_path in tqdm(videos, desc=f"Testing {label.capitalize()}"):
+            cap = cv2.VideoCapture(video_path)
+            frames, current = [], 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if current % FRAME_SAMPLE_RATE == 0:
+                    img_H, img_W = frame.shape[:2]
+                    face_detector.setInputSize((img_W, img_H))
+                    _, detections = face_detector.detect(frame)
+                    if detections is not None:
+                        best_face = None
+                        max_conf = 0
+                        for det in detections:
+                            conf = det[-1]
+                            if conf > max_conf and conf >= CONFIDENCE_THRESHOLD:
+                                best_face = det
+                                max_conf = conf
+                        if best_face is not None:
+                            x, y, w, h = map(int, best_face[:4])
+                            x, y = max(0, x), max(0, y)
+                            w, h = min(w, img_W - x), min(h, img_H - y)
+                            face_crop = frame[y:y+h, x:x+w]
+                            if face_crop.size > 0:
+                                face_crop = cv2.cvtColor(cv2.resize(face_crop, (256, 256)), cv2.COLOR_BGR2RGB)
+                                frames.append(transform(face_crop))
+                                if len(frames) >= FRAMES_PER_VIDEO:
+                                    break
+                current += 1
+            cap.release()
 
-                frames, current = [], 0
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    if current % FRAME_SAMPLE_RATE == 0:
-                        img_H, img_W = frame.shape[:2]
-                        face_detector.setInputSize((img_W, img_H))
-                        _, detections = face_detector.detect(frame)
-                        if detections is not None and len(detections) > 0:
-                            best_face, max_confidence = None, 0
-                            for detection in detections:
-                                confidence = detection[-1]
-                                if confidence > max_confidence and confidence >= CONFIDENCE_THRESHOLD:
-                                    max_confidence, best_face = confidence, detection
-                            if best_face is not None:
-                                x, y, w, h = map(int, best_face[:4])
-                                x, y = max(0, x), max(0, y)
-                                w, h = min(w, img_W - x), min(h, img_H - y)
-                                if w > 0 and h > 0:
-                                    face_crop = frame[y:y+h, x:x+w]
-                                    if face_crop.size > 0:
-                                        face_crop = cv2.cvtColor(cv2.resize(face_crop, (256, 256)), cv2.COLOR_BGR2RGB)
-                                        frames.append(transform(face_crop))
-                                        if len(frames) >= FRAMES_PER_VIDEO:
-                                            break
-                    current += 1
-                cap.release()
-
-                if not frames:
-                    msg = f"{os.path.basename(video_path)} -> No face detected"
-                    if log_callback:
-                        log_callback(msg)
-                    else:
-                        print(msg)
-                    results.append({
-                        'video': os.path.basename(video_path),
-                        'label': label,
-                        'prediction': 'No face detected',
-                        'confidence': 0.0,
-                        'frames': 0,
-                        'correct': 0
-                    })
-                    continue
-
-                frames_tensor = torch.stack(frames).to(device)
-                labels_tensor = torch.tensor([ground_truth] * len(frames), dtype=torch.long).to(device)
-
-                with torch.no_grad():
-                    outputs = model(frames_tensor)
-                    loss = criterion(outputs, labels_tensor)
-                    running_loss += loss.item()
-
-                    probs = torch.softmax(outputs, dim=1)[:, 1]
-                    confidence = probs.mean().item()
-                    video_pred = "fake" if confidence > THRESHOLD else "real"
-                    video_pred_label = 1 if video_pred == "fake" else 0
-
-                    correct = 1 if video_pred_label == ground_truth else 0
-                    total_correct += correct
-                    total_videos += 1
-                    all_preds.append(video_pred_label)
-                    all_labels.append(ground_truth)
-
-                    msg = (f"{os.path.basename(video_path)} -> Label: {label}, Prediction: {video_pred}, "
-                           f"Confidence: {confidence:.4f}, Frames: {len(frames)}")
-                    if log_callback:
-                        log_callback(msg)
-                    else:
-                        print(msg)
-
-                    results.append({
-                        'video': os.path.basename(video_path),
-                        'label': label,
-                        'prediction': video_pred,
-                        'confidence': confidence,
-                        'frames': len(frames),
-                        'correct': correct
-                    })
-
-            except Exception as e:
-                msg = f"Error processing {os.path.basename(video_path)}: {str(e)}"
-                if log_callback:
-                    log_callback(msg)
-                else:
-                    print(msg)
+            if not frames:
                 continue
 
-    accuracy = total_correct / total_videos if total_videos > 0 else 0.0
-    avg_loss = running_loss / total_videos if total_videos > 0 else 0.0
-    precision = precision_score(all_labels, all_preds, zero_division=0) if all_preds else 0.0
-    recall = recall_score(all_labels, all_preds, zero_division=0) if all_preds else 0.0
-    f1 = f1_score(all_labels, all_preds, zero_division=0) if all_preds else 0.0
+            frames_tensor = torch.stack(frames).to(device)
+            labels_tensor = torch.tensor([ground_truth] * len(frames), dtype=torch.long).to(device)
 
-    msg = (f"Test Results -> Accuracy: {accuracy:.4f}, Average Loss: {avg_loss:.4f}, "
-           f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}")
-    if log_callback:
-        log_callback(msg)
-    else:
-        print(msg)
+            with torch.no_grad():
+                outputs = model(frames_tensor)
+                loss = criterion(outputs, labels_tensor)
+                running_loss += loss.item()
+                probs = torch.softmax(outputs, dim=1)[:, 1]
+                confidence = probs.median().item()  # 🔥 MEAN yerine MEDIAN
+                pred_label = 1 if confidence > threshold else 0
+                correct = int(pred_label == ground_truth)
 
-    return results, accuracy, avg_loss, precision, recall, f1
+            total_correct += correct
+            total_videos += 1
+            all_preds.append(pred_label)
+            all_labels.append(ground_truth)
 
-# ----- ANA PIPELINE -----
+    
+    acc = total_correct / total_videos if total_videos else 0
+    loss = running_loss / total_videos if total_videos else 0
+    prec = precision_score(all_labels, all_preds, zero_division=0)
+    rec = recall_score(all_labels, all_preds, zero_division=0)
+    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    print(f"\nTest Results -> Accuracy: {acc:.4f}, Average Loss: {loss:.4f}, Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
+    return acc, prec, rec, f1
+
+
+# ----- MAIN -----
 if __name__ == "__main__":
     extract_frames()
-    train_model()
-    results, acc, loss = test_model()
+    model, best_thr = train_model()
+    print(f"\n🚀 Test aşamasında {best_thr:.3f} eşiği kullanılacak...")
+    test_model(threshold=best_thr)
+
     
     
     
