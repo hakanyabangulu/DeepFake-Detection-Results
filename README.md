@@ -64,6 +64,54 @@ For CNN :
 		! Eğitim sonuçları :  (ValAcc=0.9548, ValLoss=0.1050)
 		
 			Test Results -> Accuracy: 0.9463, Average Loss: 0.5863, Precision: 0.9459, Recall: 0.9459, F1: 0.9459
+		! Kod üzerinde küçük değişiklikler yapıldı. Ekstra olarak Confusion Matrix eklendi.
+		
+			Test Results -> Accuracy: 0.8926, Average Loss: 0.5019, Precision: 0.9394, Recall: 0.8378, F1: 0.8857
+			Ekstradan 360 adet başka ve daha zor fake videolar ile test edildi ve sonuçlar çok fazla düştü.
+			Not: Yapılan değişiklikler daha kötü sonuç verdiği için Confusion Matrix harici işlemler geri alındı.
+
+! Fourth Features
+
+		* FRAMES_PER_VIDEO = 10
+		* Extraction işleminde fake etiketli videolar için IOU kullanıldı.
+		* Real etiketliler için kullanılmadı.
+		
+		! Bu sefer Extraction işlemi için farklı videolar (anlaşılması daha zor olan ve çoğunlukla 2 veya 3 kişi bulununan videolar) kullanıldı.
+		! Fake videolar extraction işlemi sırasında takip edildi, çoğunlukla net ve fake olduğu belirli olan yüzlerin çekildiği fark edildi.
+		! Ama bazı yüzlerin fake olsa bile real gibi göründüğü fark edildi.
+		! Toplamda 205 Real & 205 Fake videoda Extraction işlemi yapıldı.
+		! 2050 Real & 1196 Fake yüz bulabildi.
+		! Beklenildiği üzere Fake videolardan alınan yüzler Real videolardan alınan yüzlerden az çıktı.
+		! Dengeyi sağlamak adına eğitime başlamadan önce Real videolardan net olmayan yüzler çıkartıldı ve fake videolardan biraz daha eklendi.
+		! 1800 Real & 1800 Fake yüz ile eğitim yapıldı.
+		
+		! Eğitim Sonuçları : (ValAcc=0.9722, ValLoss=0.0872)
+			
+			Test Results -> Accuracy: 0.6167, Average Loss: 2.0670, Precision: 0.7536, Recall: 0.3467, F1: 0.4749
+			Not: Burda beklenen şey zor olan videolardaki tahminlerin doğru olması yönündeydi. Eğitim sonuçları iyi şeyler vaat ediyordu.
+			Bazı zor olan videolardaki sonuçlar incelendi. Modelin eğitilmesi sürecinde herhangi bir sorunun olmadığı , sorunun veri setinde olduğu anlaşıldı.
+			Sonuç: Zor olan videolar insanın bile anlayamayacağı videolardı. Bu yüzden test için videolar değiştirildi.
+			
+			
+! Fifth Features
+
+		* BATCH = 32
+		* EPOCHS = 15
+		* LR = 1e-4
+		* FRAMES_PER_VIDEO = 10
+		* THRESHOLD = 0.5
+		* FRAME_SAMPLE_RATE = 5
+		* CONFIDENCE_THRESHOLD = 0.94
+		
+		! Veri seti karıştırıldı. Real için Yunet , Fake için Mtcnn kullanıldı.
+		! 150 Real & 175 Fake video test edildi.
+			
+			Test Results -> Accuracy: 0.9569, Average Loss: 0.2141, Precision: 0.9600, Recall: 0.9600, F1: 0.9600
+			
+<img width="333" height="266" alt="Threshold = 0 5" src="https://github.com/user-attachments/assets/edcdd3b7-7ef3-415e-a2f5-737062d195a0" />
+			
+			Not: 150 Real videodan 7 adet kaçırdı , 175 Fake videodan 7 adet kaçırdı.
+			Sonuç: Bu sonuçlar modelin iyi eğitildiği ve veri setinin iyi olduğu anlamına geliyor. Son olarak veri seti genişletilecek ve bu özelliklerle son bir test işlemi yapılacak. 	
 		
 	
 
