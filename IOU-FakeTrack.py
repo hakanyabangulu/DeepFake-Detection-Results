@@ -14,26 +14,40 @@ import matplotlib.pyplot as plt
 
 # ----- PATHS -----
 VIDEO_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Videolar"
-FRAME_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Frames\MTCNN_Frames"
+FRAME_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Frames\Yunet_Frames"
 TEST_VIDEO_FOLDER = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\TestVideolar"
 MODEL_PATH = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Models\cnn_classifier.pth"
 FACE_MODEL_PATH = r"C:\Users\hakan\Desktop\School\4.th Grade\1.st Term\Bitirme Projesi\DeepFake Detection\Models\face_detection_yunet_2023mar.onnx"
 
 BATCH = 32
 EPOCHS = 15
-LR = 1e-4
+LR = 1e-3
 FRAMES_PER_VIDEO = 10
-THRESHOLD = 0.5
 FRAME_SAMPLE_RATE = 5
-CONFIDENCE_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = 0.94
 
 # ----- YÜZ ALGILAMA -----
 if not os.path.exists(FACE_MODEL_PATH):
     raise ValueError(f"YuNet model dosyası bulunamadı: {FACE_MODEL_PATH}")
 face_detector = cv2.FaceDetectorYN.create(FACE_MODEL_PATH, "", (320, 320))
 
-# ----- FRAME EXTRACTION -----
-def extract_frames(video_files=None, video_folder=VIDEO_FOLDER, output_folder=FRAME_FOLDER, log_callback=None):
+# ----- HELPER FUNCTIONS -----
+def iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[0]+boxA[2], boxB[0]+boxB[2])
+    yB = min(boxA[1]+boxA[3], boxB[1]+boxB[3])
+    interW = max(0, xB - xA)
+    interH = max(0, yB - yA)
+    interArea = interW * interH
+    boxAArea = boxA[2] * boxA[3]
+    boxBArea = boxB[2] * boxB[3]
+    denom = boxAArea + boxBArea - interArea
+    return interArea / denom if denom > 0 else 0.0
+
+
+def extract_frames(video_files=None, video_folder=VIDEO_FOLDER, output_folder=FRAME_FOLDER,
+                   model=None, device=None, log_callback=None):
     os.makedirs(output_folder, exist_ok=True)
     for label in ["real", "fake"]:
         input_dir = os.path.join(video_folder, label)
@@ -42,6 +56,22 @@ def extract_frames(video_files=None, video_folder=VIDEO_FOLDER, output_folder=FR
         videos = video_files if video_files else [f for f in os.listdir(input_dir) if f.endswith(".mp4")]
         for video in tqdm(videos, desc=f"Processing {label}"):
             video_path = video if video_files else os.path.join(input_dir, video)
+            if label == "fake" and model is not None:
+                # Fake videolar için track tabanlı seçim
+                selected_crops = extract_and_select_fake_faces(video_path, model, device)
+                saved = 0
+                for idx, crop in enumerate(selected_crops[:FRAMES_PER_VIDEO]):
+                    frame_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(video))[0]}_{idx}_face.jpg")
+                    cv2.imwrite(frame_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+                    saved += 1
+                msg = f"{video} -> {saved} kare kaydedildi (fake track)"
+                if log_callback:
+                    log_callback(msg)
+                else:
+                    print(msg)
+                continue  # fake için track işlemi tamamlandı
+
+            # Real videolar veya model verilmemişse eski mantık
             cap = cv2.VideoCapture(video_path)
             current, saved = 0, 0
             while True:
@@ -53,24 +83,17 @@ def extract_frames(video_files=None, video_folder=VIDEO_FOLDER, output_folder=FR
                     face_detector.setInputSize((img_W, img_H))
                     _, detections = face_detector.detect(frame)
                     if detections is not None and len(detections) > 0:
-                        best_face, max_confidence = None, 0
-                        for detection in detections:
-                            confidence = detection[-1]
-                            if confidence > max_confidence and confidence >= CONFIDENCE_THRESHOLD:
-                                max_confidence, best_face = confidence, detection
-                        if best_face is not None:
-                            x, y, w, h = map(int, best_face[:4])
-                            x, y = max(0, x), max(0, y)
-                            w, h = min(w, img_W - x), min(h, img_H - y)
-                            if w > 0 and h > 0:
-                                face_crop = frame[y:y+h, x:x+w]
-                                if face_crop.size > 0:
-                                    face_crop = cv2.resize(face_crop, (256, 256))
-                                    frame_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(video))[0]}_{current}_face.jpg")
-                                    cv2.imwrite(frame_path, face_crop)
-                                    saved += 1
-                                    if saved >= FRAMES_PER_VIDEO:
-                                        break
+                        best_face = detections[0]  # real için ilk yüz
+                        x, y, w, h = map(int, best_face[:4])
+                        x, y = max(0, x), max(0, y)
+                        w, h = min(w, img_W - x), min(h, img_H - y)
+                        if w>0 and h>0:
+                            face_crop = cv2.resize(frame[y:y+h, x:x+w], (256,256))
+                            frame_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(video))[0]}_{current}_face.jpg")
+                            cv2.imwrite(frame_path, face_crop)
+                            saved += 1
+                            if saved >= FRAMES_PER_VIDEO:
+                                break
                 current += 1
             cap.release()
             msg = f"{video} -> {saved} kare kaydedildi"
@@ -78,6 +101,69 @@ def extract_frames(video_files=None, video_folder=VIDEO_FOLDER, output_folder=FR
                 log_callback(msg)
             else:
                 print(msg)
+
+
+
+def extract_and_select_fake_faces(video_path, model=None, device=None,
+                                  frames_per_video=FRAMES_PER_VIDEO,
+                                  sample_rate=FRAME_SAMPLE_RATE,
+                                  conf_thresh=CONFIDENCE_THRESHOLD,
+                                  iou_thresh=0.4):
+    cap = cv2.VideoCapture(video_path)
+    tracks = []
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_idx % sample_rate == 0:
+            H, W = frame.shape[:2]
+            face_detector.setInputSize((W, H))
+            _, dets = face_detector.detect(frame)
+            if dets is not None and len(dets) > 0:
+                for d in dets:
+                    x, y, w, h, conf = float(d[0]), float(d[1]), float(d[2]), float(d[3]), float(d[4])
+                    if conf < conf_thresh:
+                        continue
+                    x_i, y_i = int(max(0, x)), int(max(0, y))
+                    w_i, h_i = int(max(1, min(W - x_i, w))), int(max(1, min(H - y_i, h)))
+                    bbox = (x_i, y_i, w_i, h_i)
+                    best_iou, best_idx = 0.0, -1
+                    for idx, t in enumerate(tracks):
+                        last_box = t['bboxes'][-1]
+                        cur_iou = iou(last_box, bbox)
+                        if cur_iou > best_iou:
+                            best_iou, best_idx = cur_iou, idx
+                    crop = cv2.cvtColor(cv2.resize(frame[y_i:y_i+h_i, x_i:x_i+w_i], (256,256)), cv2.COLOR_BGR2RGB)
+                    if best_iou >= iou_thresh:
+                        tracks[best_idx]['bboxes'].append(bbox)
+                        tracks[best_idx]['crops'].append(crop)
+                    else:
+                        tracks.append({'bboxes':[bbox], 'crops':[crop]})
+        frame_idx += 1
+    cap.release()
+    if not tracks:
+        return []
+
+    # Model yoksa veya test modu için sadece ilk track'i döndür
+    if model is None:
+        return tracks[0]['crops']
+
+    # Eğitim/validation için track-level score hesaplama
+    model.eval()
+    transform = T.Compose([T.ToTensor()])
+    track_scores = []
+    with torch.no_grad():
+        for t in tracks:
+            crops = t['crops'][:frames_per_video]
+            tensors = [transform(c).to(device) for c in crops]
+            batch = torch.stack(tensors)
+            outputs = model(batch)
+            probs = torch.softmax(outputs, dim=1)[:,1]
+            track_scores.append(probs.median().item())
+    best_idx = int(np.argmax(track_scores))
+    return tracks[best_idx]['crops']
+
 
 # ----- DATASET -----
 class DeepFakeDataset(Dataset):
@@ -88,10 +174,8 @@ class DeepFakeDataset(Dataset):
             files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".jpg")]
             self.data.extend(files)
             self.labels.extend([0 if label == "real" else 1] * len(files))
-
     def __len__(self):
         return len(self.data)
-
     def __getitem__(self, idx):
         img = cv2.imread(self.data[idx])
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -112,16 +196,14 @@ class CNNClassifier(nn.Module):
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(256 * 16 * 16, 512), nn.ReLU(), nn.Dropout(0.5),
-            nn.Linear(512, 2)
+            nn.Linear(256*16*16, 512), nn.ReLU(), nn.Dropout(0.5),
+            nn.Linear(512,2)
         )
-
     def forward(self, x):
         x = self.features(x)
         return self.classifier(x)
 
-# ----- TRAIN -----
-
+# ----- TRAIN FUNCTION -----
 def train_model(log_callback=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -225,7 +307,7 @@ def train_model(log_callback=None):
     return model, best_thr
 
 # ----- TEST FUNCTION -----
-def test_model(threshold=0.542, log_callback=None):
+def test_model(threshold=0.5, log_callback=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     transform = T.Compose([T.ToPILImage(), T.Resize((256, 256)), T.ToTensor()])
     criterion = nn.CrossEntropyLoss()
@@ -313,8 +395,7 @@ def test_model(threshold=0.542, log_callback=None):
 # ----- MAIN -----
 if __name__=="__main__":
     # Fake track seçimi için model ve device parametrelerini veriyoruz
-    #extract_frames()
-   # model, best_thr = train_model()
-   # print(f"\n🚀 Test aşamasında {best_thr:.3f} eşiği kullanılacak...")
-    test_model(threshold = 0.5)
-
+   # extract_frames()
+    model, best_thr = train_model()
+    #print(f"\n🚀 Test aşamasında {best_thr:.3f} eşiği kullanılacak...")
+    test_model(threshold=0.693)
