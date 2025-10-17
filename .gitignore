@@ -1,4 +1,4 @@
-Deepfake
-MTCNN_Face
-Haar_Cascade
-IOU-FakeTrack
+Deepfake.py
+MTCNN_Face.py
+Haar_Cascade.py
+IOU-FakeTrack.py
